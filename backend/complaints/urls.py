@@ -1,27 +1,28 @@
-from django.urls import path
+from django.urls import path, include
 from . import views
 
 app_name = 'complaints'
 
 urlpatterns = [
-    # Complaint CRUD
-    path('', views.ComplaintListCreateView.as_view(), name='complaint_list_create'),
-    path('<uuid:pk>/', views.ComplaintDetailView.as_view(), name='complaint_detail'),
-    path('<uuid:pk>/comments/', views.ComplaintCommentListCreateView.as_view(), name='complaint_comments'),
-    path('<uuid:pk>/files/', views.ComplaintFileListCreateView.as_view(), name='complaint_files'),
-    path('<uuid:pk>/status/', views.ComplaintStatusUpdateView.as_view(), name='complaint_status_update'),
-    path('<uuid:pk>/assign/', views.ComplaintAssignView.as_view(), name='complaint_assign'),
-    path('<uuid:pk>/escalate/', views.ComplaintEscalateView.as_view(), name='complaint_escalate'),
+    # Complaint endpoints
+    path('', views.ComplaintListView.as_view(), name='complaint-list'),
+    path('create/', views.ComplaintCreateView.as_view(), name='complaint-create'),
+    path('<uuid:id>/', views.ComplaintDetailView.as_view(), name='complaint-detail'),
+    path('forward/', views.forward_complaint, name='complaint-forward'),
+    path('<uuid:complaint_id>/responses/', views.ComplaintResponseCreateView.as_view(), name='complaint-response-create'),
+    path('<uuid:complaint_id>/comments/', views.ComplaintCommentListView.as_view(), name='complaint-comment-list'),
+    path('<uuid:complaint_id>/comments/', views.ComplaintCommentCreateView.as_view(), name='complaint-comment-create'),
+    path('comments/<int:comment_id>/reply/', views.reply_to_comment, name='comment-reply'),
     
-    # Categories
-    path('categories/', views.ComplaintCategoryListView.as_view(), name='category_list'),
+    # Withdrawal endpoints
+    path('withdrawals/', views.WithdrawalRequestListView.as_view(), name='withdrawal-list'),
+    path('withdrawals/create/', views.WithdrawalRequestCreateView.as_view(), name='withdrawal-create'),
+    path('withdrawals/<uuid:id>/', views.WithdrawalRequestDetailView.as_view(), name='withdrawal-detail'),
     
-    # File operations
-    path('files/<int:pk>/', views.ComplaintFileDetailView.as_view(), name='file_detail'),
-    path('files/<int:pk>/download/', views.download_complaint_file, name='file_download'),
-    
-    # Statistics
-    path('stats/', views.ComplaintStatsView.as_view(), name='complaint_stats'),
-    path('my-stats/', views.MyComplaintStatsView.as_view(), name='my_complaint_stats'),
+    # Utility endpoints
+    path('categories/', views.ComplaintCategoryListView.as_view(), name='category-list'),
+    path('departments/', views.DepartmentListView.as_view(), name='department-list'),
+    path('files/<int:file_id>/download/', views.download_file, name='file-download'),
+    path('statistics/', views.complaint_statistics, name='complaint-statistics'),
 ]
 

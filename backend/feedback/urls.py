@@ -4,8 +4,9 @@ from . import views
 app_name = 'feedback'
 
 urlpatterns = [
-    # Feedback CRUD
-    path('', views.FeedbackListCreateView.as_view(), name='feedback_list_create'),
+    # Feedback endpoints - matching your exact structure
+    path('', views.FeedbackListCreateView.as_view(), name='feedback_create'),  # POST /api/complaints/feedback/
+    path('list/', views.FeedbackListCreateView.as_view(), name='feedback_list'),  # GET /api/complaints/feedback/list/
     path('<uuid:pk>/', views.FeedbackDetailView.as_view(), name='feedback_detail'),
     path('<uuid:pk>/respond/', views.FeedbackResponseCreateView.as_view(), name='feedback_respond'),
     path('<uuid:pk>/vote/', views.FeedbackVoteView.as_view(), name='feedback_vote'),
@@ -21,4 +22,3 @@ urlpatterns = [
     path('stats/', views.FeedbackStatsView.as_view(), name='feedback_stats'),
     path('my-stats/', views.MyFeedbackStatsView.as_view(), name='my_feedback_stats'),
 ]
-

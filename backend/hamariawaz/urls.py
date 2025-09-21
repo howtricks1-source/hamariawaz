@@ -14,13 +14,12 @@ urlpatterns = [
     # Admin
     path('admin/', admin.site.urls),
     
-    # API endpoints
-    path('api/v1/', include(router.urls)),
-    path('api/v1/accounts/', include('accounts.urls')),
-    path('api/v1/complaints/', include('complaints.urls')),
-    path('api/v1/feedback/', include('feedback.urls')),
-    path('api/v1/notifications/', include('notifications.urls')),
-    path('api/v1/analytics/', include('analytics.urls')),
+    # API endpoints - matching your exact structure
+    path('api/auth/', include('accounts.urls')),
+    path('api/complaints/', include('complaints.urls')),
+    path('api/complaints/feedback/', include('feedback.urls')),
+    path('api/notifications/', include('notifications.urls')),
+    path('api/analytics/', include('analytics.urls')),
     
     # API documentation (will be added later)
     # path('api/docs/', include('drf_spectacular.urls')),

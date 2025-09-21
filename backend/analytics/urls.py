@@ -4,8 +4,12 @@ from . import views
 app_name = 'analytics'
 
 urlpatterns = [
-    # Dashboard
-    path('dashboard/', views.DashboardView.as_view(), name='dashboard'),
+    # Analytics endpoints - matching your exact structure
+    path('dashboard/', views.DashboardView.as_view(), name='dashboard'),  # GET /api/analytics/dashboard/
+    path('complaints-by-department/', views.complaints_by_department_chart, name='complaints_by_department'),  # GET /api/analytics/complaints-by-department/
+    path('complaint-trends/', views.complaints_trend_chart, name='complaint_trends'),  # GET /api/analytics/complaint-trends/
+    
+    # Additional analytics endpoints
     path('dashboard/widgets/', views.DashboardWidgetListView.as_view(), name='dashboard_widgets'),
     path('dashboard/widgets/<int:pk>/', views.DashboardWidgetDetailView.as_view(), name='widget_detail'),
     
@@ -16,8 +20,6 @@ urlpatterns = [
     
     # Charts and data
     path('charts/complaints-by-status/', views.complaints_by_status_chart, name='complaints_by_status'),
-    path('charts/complaints-by-department/', views.complaints_by_department_chart, name='complaints_by_department'),
-    path('charts/complaints-trend/', views.complaints_trend_chart, name='complaints_trend'),
     path('charts/resolution-time/', views.resolution_time_chart, name='resolution_time'),
     path('charts/feedback-ratings/', views.feedback_ratings_chart, name='feedback_ratings'),
     
@@ -35,4 +37,3 @@ urlpatterns = [
     path('export/feedback/', views.export_feedback, name='export_feedback'),
     path('export/users/', views.export_users, name='export_users'),
 ]
-

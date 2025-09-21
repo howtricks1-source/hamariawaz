@@ -1,164 +1,430 @@
 from rest_framework import generics, status, permissions
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
-from rest_framework.views import APIView
-from django.http import HttpResponse, Http404
+from rest_framework.parsers import MultiPartParser, FormParser
 from django.shortcuts import get_object_or_404
-from django.db import models
-from django_filters.rest_framework import DjangoFilterBackend
-from rest_framework import filters
+from django.db.models import Q, Count
+from django.utils import timezone
+from django.core.files.storage import default_storage
+from django.http import HttpResponse, Http404
+from django.contrib.auth import get_user_model
+import mimetypes
+import os
 
-from .models import Complaint, ComplaintCategory, ComplaintFile, ComplaintComment
-from accounts.permissions import (
-    IsStudentUser, IsAuthorityUser, CanAccessComplaint, CanEditComplaint,
-    CanAssignComplaint, CanEscalateComplaint
+User = get_user_model()
+
+from .models import (
+    Complaint, ComplaintCategory, ComplaintComment, ComplaintResponse, 
+    ComplaintForward, WithdrawalRequest, ComplaintFile, WithdrawalFile,
+    ComplaintStatusHistory, Department
 )
+from .serializers import (
+    ComplaintSerializer, ComplaintCreateSerializer, ComplaintDetailSerializer,
+    ComplaintCommentSerializer, ComplaintResponseSerializer, ComplaintForwardSerializer,
+    WithdrawalRequestSerializer, WithdrawalRequestCreateSerializer,
+    ComplaintCategorySerializer, ComplaintFileSerializer
+)
+from accounts.permissions import IsStudentUser, IsStaffUser, IsDepartmentHead, IsViceChancellor, IsAdminUser
 
-
-class ComplaintListCreateView(generics.ListCreateAPIView):
-    """List and create complaints"""
+class ComplaintListView(generics.ListAPIView):
+    """List complaints based on user role"""
+    serializer_class = ComplaintSerializer
     permission_classes = [permissions.IsAuthenticated]
-    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
-    filterset_fields = ['status', 'priority', 'category', 'department', 'assigned_to']
-    search_fields = ['title', 'description', 'complaint_number']
-    ordering_fields = ['created_at', 'updated_at', 'priority']
-    ordering = ['-created_at']
-    
+
     def get_queryset(self):
         user = self.request.user
+        queryset = Complaint.objects.select_related('student', 'category', 'department', 'assigned_to')
         
-        if user.is_student:
+        if user.role == 'student':
             # Students can only see their own complaints
-            return Complaint.objects.filter(student=user).select_related(
-                'student', 'department', 'assigned_to', 'category'
-            )
-        elif user.is_admin_user or user.is_vc:
-            # Admin and VC can see all complaints
-            return Complaint.objects.all().select_related(
-                'student', 'department', 'assigned_to', 'category'
-            )
-        elif user.is_department_head:
-            # Department heads can see complaints in their department
-            return Complaint.objects.filter(department=user.department).select_related(
-                'student', 'department', 'assigned_to', 'category'
-            )
-        elif user.is_staff_member:
+            queryset = queryset.filter(student=user)
+        elif user.role == 'staff':
             # Staff can see complaints assigned to them or in their department
-            return Complaint.objects.filter(
-                models.Q(assigned_to=user) | models.Q(department=user.department)
-            ).select_related('student', 'department', 'assigned_to', 'category')
+            queryset = queryset.filter(
+                Q(assigned_to=user) | Q(department=user.department)
+            )
+        elif user.role == 'head':
+            # Department heads can see all complaints in their department
+            queryset = queryset.filter(department=user.department)
+        elif user.role in ['vc', 'admin']:
+            # VC and Admin can see all complaints
+            pass
+        else:
+            queryset = queryset.none()
         
-        return Complaint.objects.none()
+        # Apply filters
+        status_filter = self.request.query_params.get('status')
+        if status_filter:
+            queryset = queryset.filter(status=status_filter)
+        
+        priority_filter = self.request.query_params.get('priority')
+        if priority_filter:
+            queryset = queryset.filter(priority=priority_filter)
+        
+        category_filter = self.request.query_params.get('category')
+        if category_filter:
+            queryset = queryset.filter(category_id=category_filter)
+        
+        department_filter = self.request.query_params.get('department')
+        if department_filter:
+            queryset = queryset.filter(department_id=department_filter)
+        
+        search = self.request.query_params.get('search')
+        if search:
+            queryset = queryset.filter(
+                Q(title__icontains=search) | 
+                Q(description__icontains=search) |
+                Q(complaint_number__icontains=search)
+            )
+        
+        return queryset.order_by('-created_at')
 
+class ComplaintCreateView(generics.CreateAPIView):
+    """Create a new complaint"""
+    serializer_class = ComplaintCreateSerializer
+    permission_classes = [IsStudentUser]
+    parser_classes = [MultiPartParser, FormParser]
 
-class ComplaintDetailView(generics.RetrieveUpdateDestroyAPIView):
-    """Complaint detail view"""
-    permission_classes = [permissions.IsAuthenticated, CanAccessComplaint]
-    
+    def perform_create(self, serializer):
+        complaint = serializer.save(student=self.request.user)
+        
+        # Handle file uploads
+        files = self.request.FILES.getlist('files')
+        for file in files:
+            ComplaintFile.objects.create(
+                complaint=complaint,
+                file=file,
+                uploaded_by=self.request.user
+            )
+
+class ComplaintDetailView(generics.RetrieveUpdateAPIView):
+    """Get and update complaint details"""
+    serializer_class = ComplaintDetailSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    lookup_field = 'id'
+
     def get_queryset(self):
-        return Complaint.objects.select_related(
-            'student', 'department', 'assigned_to', 'category'
-        ).prefetch_related('comments', 'files', 'status_history')
+        user = self.request.user
+        queryset = Complaint.objects.select_related('student', 'category', 'department', 'assigned_to')
+        
+        if user.role == 'student':
+            queryset = queryset.filter(student=user)
+        elif user.role == 'staff':
+            queryset = queryset.filter(
+                Q(assigned_to=user) | Q(department=user.department)
+            )
+        elif user.role == 'head':
+            queryset = queryset.filter(department=user.department)
+        elif user.role in ['vc', 'admin']:
+            pass
+        else:
+            queryset = queryset.none()
+        
+        return queryset
 
+    def perform_update(self, serializer):
+        old_status = self.get_object().status
+        complaint = serializer.save()
+        
+        # Track status changes
+        if old_status != complaint.status:
+            ComplaintStatusHistory.objects.create(
+                complaint=complaint,
+                old_status=old_status,
+                new_status=complaint.status,
+                changed_by=self.request.user,
+                reason=self.request.data.get('status_reason', '')
+            )
+            
+            # Set resolved_at if status is resolved
+            if complaint.status == 'resolved':
+                complaint.resolved_at = timezone.now()
+                complaint.save()
 
-class ComplaintCommentListCreateView(generics.ListCreateAPIView):
-    """List and create complaint comments"""
-    permission_classes = [permissions.IsAuthenticated, CanAccessComplaint]
+@api_view(['POST'])
+@permission_classes([permissions.IsAuthenticated])
+def forward_complaint(request):
+    """Forward a complaint to another user"""
+    complaint_id = request.data.get('complaint_id')
+    forward_to_id = request.data.get('forward_to')
+    reason = request.data.get('reason', '')
     
+    try:
+        complaint = Complaint.objects.get(id=complaint_id)
+        forward_to_user = get_object_or_404(User, id=forward_to_id)
+        
+        # Check permissions
+        user = request.user
+        if user.role == 'student':
+            return Response({'error': 'Students cannot forward complaints'}, 
+                          status=status.HTTP_403_FORBIDDEN)
+        
+        if user.role == 'staff' and complaint.department != user.department:
+            return Response({'error': 'Cannot forward complaints outside your department'}, 
+                          status=status.HTTP_403_FORBIDDEN)
+        
+        # Create forward record
+        forward = ComplaintForward.objects.create(
+            complaint=complaint,
+            forwarded_by=user,
+            forwarded_to=forward_to_user,
+            reason=reason
+        )
+        
+        # Update complaint assignment
+        complaint.assigned_to = forward_to_user
+        complaint.save()
+        
+        serializer = ComplaintForwardSerializer(forward)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+        
+    except Complaint.DoesNotExist:
+        return Response({'error': 'Complaint not found'}, status=status.HTTP_404_NOT_FOUND)
+
+class ComplaintResponseCreateView(generics.CreateAPIView):
+    """Add a response to a complaint"""
+    serializer_class = ComplaintResponseSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def perform_create(self, serializer):
+        complaint_id = self.kwargs.get('complaint_id')
+        complaint = get_object_or_404(Complaint, id=complaint_id)
+        
+        # Check permissions
+        user = self.request.user
+        if user.role == 'student' and complaint.student != user:
+            raise permissions.PermissionDenied("Cannot respond to other students' complaints")
+        
+        serializer.save(complaint=complaint, responder=user)
+
+class ComplaintCommentListView(generics.ListAPIView):
+    """List comments for a complaint"""
+    serializer_class = ComplaintCommentSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
     def get_queryset(self):
-        complaint_id = self.kwargs['pk']
-        complaint = get_object_or_404(Complaint, pk=complaint_id)
+        complaint_id = self.kwargs.get('complaint_id')
+        complaint = get_object_or_404(Complaint, id=complaint_id)
         
-        # Check if user can access this complaint
-        if not self.request.user.can_view_complaint(complaint):
-            return ComplaintComment.objects.none()
+        # Check permissions
+        user = self.request.user
+        if user.role == 'student' and complaint.student != user:
+            raise permissions.PermissionDenied("Cannot view other students' complaint comments")
         
-        queryset = ComplaintComment.objects.filter(complaint=complaint)
+        queryset = ComplaintComment.objects.filter(complaint=complaint, parent=None)
         
-        # Students can't see internal comments
-        if self.request.user.is_student:
+        # Filter internal comments for students
+        if user.role == 'student':
             queryset = queryset.filter(is_internal=False)
         
-        return queryset.select_related('author')
+        return queryset.order_by('created_at')
 
-
-class ComplaintFileListCreateView(generics.ListCreateAPIView):
-    """List and create complaint files"""
-    permission_classes = [permissions.IsAuthenticated, CanAccessComplaint]
-    
-    def get_queryset(self):
-        complaint_id = self.kwargs['pk']
-        complaint = get_object_or_404(Complaint, pk=complaint_id)
-        
-        # Check if user can access this complaint
-        if not self.request.user.can_view_complaint(complaint):
-            return ComplaintFile.objects.none()
-        
-        return ComplaintFile.objects.filter(complaint=complaint).select_related('uploaded_by')
-
-
-class ComplaintFileDetailView(generics.RetrieveDestroyAPIView):
-    """Complaint file detail view"""
+class ComplaintCommentCreateView(generics.CreateAPIView):
+    """Add a comment to a complaint"""
+    serializer_class = ComplaintCommentSerializer
     permission_classes = [permissions.IsAuthenticated]
+
+    def perform_create(self, serializer):
+        complaint_id = self.kwargs.get('complaint_id')
+        complaint = get_object_or_404(Complaint, id=complaint_id)
+        
+        # Check permissions
+        user = self.request.user
+        if user.role == 'student' and complaint.student != user:
+            raise permissions.PermissionDenied("Cannot comment on other students' complaints")
+        
+        serializer.save(complaint=complaint, author=user)
+
+@api_view(['POST'])
+@permission_classes([permissions.IsAuthenticated])
+def reply_to_comment(request, comment_id):
+    """Reply to a comment"""
+    parent_comment = get_object_or_404(ComplaintComment, id=comment_id)
+    content = request.data.get('content')
+    is_internal = request.data.get('is_internal', False)
     
+    if not content:
+        return Response({'error': 'Content is required'}, status=status.HTTP_400_BAD_REQUEST)
+    
+    # Check permissions
+    user = request.user
+    if user.role == 'student' and parent_comment.complaint.student != user:
+        return Response({'error': 'Cannot reply to comments on other students\' complaints'}, 
+                       status=status.HTTP_403_FORBIDDEN)
+    
+    reply = ComplaintComment.objects.create(
+        complaint=parent_comment.complaint,
+        author=user,
+        content=content,
+        is_internal=is_internal and user.role != 'student',  # Students cannot create internal comments
+        parent=parent_comment
+    )
+    
+    serializer = ComplaintCommentSerializer(reply)
+    return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+# Withdrawal Request Views
+class WithdrawalRequestListView(generics.ListAPIView):
+    """List withdrawal requests"""
+    serializer_class = WithdrawalRequestSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
     def get_queryset(self):
-        return ComplaintFile.objects.select_related('complaint', 'uploaded_by')
+        user = self.request.user
+        queryset = WithdrawalRequest.objects.select_related('complaint', 'student', 'reviewed_by')
+        
+        if user.role == 'student':
+            queryset = queryset.filter(student=user)
+        elif user.role == 'staff':
+            queryset = queryset.filter(complaint__department=user.department)
+        elif user.role == 'head':
+            queryset = queryset.filter(complaint__department=user.department)
+        elif user.role in ['vc', 'admin']:
+            pass
+        else:
+            queryset = queryset.none()
+        
+        return queryset.order_by('-created_at')
 
+class WithdrawalRequestCreateView(generics.CreateAPIView):
+    """Create a withdrawal request"""
+    serializer_class = WithdrawalRequestCreateSerializer
+    permission_classes = [IsStudentUser]
+    parser_classes = [MultiPartParser, FormParser]
 
-class ComplaintStatusUpdateView(APIView):
-    """Update complaint status"""
-    permission_classes = [permissions.IsAuthenticated, CanEditComplaint]
-    
-    def post(self, request, pk):
-        # Placeholder implementation
-        return Response({'message': 'Status update functionality will be implemented'})
+    def perform_create(self, serializer):
+        withdrawal = serializer.save(student=self.request.user)
+        
+        # Handle file uploads
+        files = self.request.FILES.getlist('files')
+        for file in files:
+            WithdrawalFile.objects.create(
+                withdrawal_request=withdrawal,
+                file=file
+            )
 
+class WithdrawalRequestDetailView(generics.RetrieveUpdateAPIView):
+    """Get and update withdrawal request details"""
+    serializer_class = WithdrawalRequestSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    lookup_field = 'id'
 
-class ComplaintAssignView(APIView):
-    """Assign complaint to staff"""
-    permission_classes = [permissions.IsAuthenticated, CanAssignComplaint]
-    
-    def post(self, request, pk):
-        # Placeholder implementation
-        return Response({'message': 'Assignment functionality will be implemented'})
+    def get_queryset(self):
+        user = self.request.user
+        queryset = WithdrawalRequest.objects.select_related('complaint', 'student', 'reviewed_by')
+        
+        if user.role == 'student':
+            queryset = queryset.filter(student=user)
+        elif user.role == 'staff':
+            queryset = queryset.filter(complaint__department=user.department)
+        elif user.role == 'head':
+            queryset = queryset.filter(complaint__department=user.department)
+        elif user.role in ['vc', 'admin']:
+            pass
+        else:
+            queryset = queryset.none()
+        
+        return queryset
 
+    def perform_update(self, serializer):
+        withdrawal = serializer.save(reviewed_by=self.request.user, reviewed_at=timezone.now())
+        
+        # If approved, update complaint status
+        if withdrawal.status == 'approved':
+            withdrawal.complaint.status = 'withdrawn'
+            withdrawal.complaint.save()
 
-class ComplaintEscalateView(APIView):
-    """Escalate complaint"""
-    permission_classes = [permissions.IsAuthenticated, CanEscalateComplaint]
-    
-    def post(self, request, pk):
-        # Placeholder implementation
-        return Response({'message': 'Escalation functionality will be implemented'})
-
-
+# Utility Views
 class ComplaintCategoryListView(generics.ListAPIView):
     """List complaint categories"""
     queryset = ComplaintCategory.objects.filter(is_active=True)
+    serializer_class = ComplaintCategorySerializer
     permission_classes = [permissions.IsAuthenticated]
 
-
-class ComplaintStatsView(APIView):
-    """Complaint statistics"""
-    permission_classes = [IsAuthorityUser]
-    
-    def get(self, request):
-        # Placeholder implementation
-        return Response({'message': 'Statistics functionality will be implemented'})
-
-
-class MyComplaintStatsView(APIView):
-    """My complaint statistics (for students)"""
-    permission_classes = [IsStudentUser]
-    
-    def get(self, request):
-        # Placeholder implementation
-        return Response({'message': 'My statistics functionality will be implemented'})
-
+class DepartmentListView(generics.ListAPIView):
+    """List departments"""
+    queryset = Department.objects.all()
+    serializer_class = 'DepartmentSerializer'  # Will create this
+    permission_classes = [permissions.IsAuthenticated]
 
 @api_view(['GET'])
 @permission_classes([permissions.IsAuthenticated])
-def download_complaint_file(request, pk):
-    """Download complaint file"""
-    # Placeholder implementation
-    return HttpResponse('File download functionality will be implemented')
+def download_file(request, file_id):
+    """Download complaint or withdrawal file"""
+    try:
+        # Try complaint file first
+        try:
+            file_obj = ComplaintFile.objects.get(id=file_id)
+            complaint = file_obj.complaint
+            
+            # Check permissions
+            user = request.user
+            if user.role == 'student' and complaint.student != user:
+                raise permissions.PermissionDenied("Cannot download files from other students' complaints")
+            elif user.role == 'staff' and complaint.department != user.department:
+                raise permissions.PermissionDenied("Cannot download files from other departments")
+            
+        except ComplaintFile.DoesNotExist:
+            # Try withdrawal file
+            file_obj = WithdrawalFile.objects.get(id=file_id)
+            withdrawal = file_obj.withdrawal_request
+            
+            # Check permissions
+            user = request.user
+            if user.role == 'student' and withdrawal.student != user:
+                raise permissions.PermissionDenied("Cannot download files from other students' withdrawals")
+        
+        if not default_storage.exists(file_obj.file.name):
+            raise Http404("File not found")
+        
+        # Serve file
+        file_path = file_obj.file.path
+        content_type, _ = mimetypes.guess_type(file_path)
+        
+        with open(file_path, 'rb') as f:
+            response = HttpResponse(f.read(), content_type=content_type)
+            response['Content-Disposition'] = f'attachment; filename="{file_obj.file_name}"'
+            return response
+            
+    except (ComplaintFile.DoesNotExist, WithdrawalFile.DoesNotExist):
+        raise Http404("File not found")
+
+@api_view(['GET'])
+@permission_classes([permissions.IsAuthenticated])
+def complaint_statistics(request):
+    """Get complaint statistics for dashboard"""
+    user = request.user
+    
+    if user.role == 'student':
+        complaints = Complaint.objects.filter(student=user)
+    elif user.role == 'staff':
+        complaints = Complaint.objects.filter(
+            Q(assigned_to=user) | Q(department=user.department)
+        )
+    elif user.role == 'head':
+        complaints = Complaint.objects.filter(department=user.department)
+    elif user.role in ['vc', 'admin']:
+        complaints = Complaint.objects.all()
+    else:
+        complaints = Complaint.objects.none()
+    
+    stats = {
+        'total_complaints': complaints.count(),
+        'pending_complaints': complaints.filter(status='pending').count(),
+        'in_progress_complaints': complaints.filter(status='in_progress').count(),
+        'resolved_complaints': complaints.filter(status='resolved').count(),
+        'rejected_complaints': complaints.filter(status='rejected').count(),
+        'withdrawn_complaints': complaints.filter(status='withdrawn').count(),
+    }
+    
+    # Add role-specific stats
+    if user.role == 'student':
+        stats['my_complaints'] = complaints.count()
+        stats['awaiting_response'] = complaints.filter(
+            status__in=['pending', 'in_progress']
+        ).count()
+    elif user.role in ['staff', 'head', 'vc', 'admin']:
+        stats['assigned_to_me'] = complaints.filter(assigned_to=user).count()
+        stats['urgent_complaints'] = complaints.filter(is_urgent=True).count()
+    
+    return Response(stats)
